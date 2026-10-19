@@ -1,0 +1,67 @@
+name: Build autel Windows x64
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/autel-windows.yml'
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 60
+    steps:
+      - name: Checkout pinned upstream v4.0.15
+        uses: actions/checkout@v4
+        with:
+          repository: farion1231/cc-switch
+          ref: 79e754ab1b6ed50da57dae1d0faecab4b3b52f1c
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install pinned Rust
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $channel = (Select-String -Path rust-toolchain.toml -Pattern '^channel\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value
+          rustup toolchain install $channel --profile minimal
+          if ($LASTEXITCODE -ne 0) { throw 'Rust installation failed' }
+      - name: Install frontend dependencies
+        shell: pwsh
+        run: |
+          corepack enable
+          if ($LASTEXITCODE -ne 0) { throw 'Corepack setup failed' }
+          corepack install
+          if ($LASTEXITCODE -ne 0) { throw 'pnpm setup failed' }
+          pnpm install --frozen-lockfile
+          if ($LASTEXITCODE -ne 0) { throw 'Dependency installation failed' }
+      - name: Configure Windows file description
+        shell: pwsh
+        run: |
+          # Tauri uses productName for the PE FileDescription resource.
+          '{"productName":"autel","bundle":{"createUpdaterArtifacts":false}}' | Set-Content autel.conf.json -Encoding utf8
+      - name: Compile Windows executable from source
+        shell: pwsh
+        run: |
+          pnpm tauri build --no-bundle --config autel.conf.json
+          if ($LASTEXITCODE -ne 0) { throw 'Windows compilation failed' }
+      - name: Verify and package executable
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $exe = Get-Item src-tauri/target/release/cc-switch.exe
+          if ($exe.VersionInfo.FileDescription -cne 'autel') {
+            throw "Unexpected FileDescription: $($exe.VersionInfo.FileDescription)"
+          }
+          New-Item -ItemType Directory -Force output | Out-Null
+          Copy-Item $exe.FullName output/cc-switch.exe
+          'portable=true' | Set-Content output/portable.ini -Encoding utf8
+          Copy-Item LICENSE output/LICENSE.txt
+          $exe.VersionInfo | Format-List FileDescription, ProductName, FileVersion, ProductVersion | Out-File output/version-info.txt
+          Get-FileHash output/cc-switch.exe -Algorithm SHA256 | Format-List | Out-File output/SHA256.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: autel-cc-switch-v4.0.15-windows-x64
+          path: output/*
+          if-no-files-found: error
+          retention-days: 14
